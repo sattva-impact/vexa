@@ -1,0 +1,402 @@
+# Default values for the Vexa Helm chart.
+# This chart is designed for LOCAL development builds:
+#   - imagePullPolicy defaults to IfNotPresent
+#   - images default to DockerHub repos with :dev tag
+#   - Override tags with specific YYMMDD-HHMM timestamps for traceability
+
+global:
+  imageTag: ""              # When set, overrides all service image tags
+  imagePullPolicy: Always
+  imagePullSecrets: []
+  clusterDomain: cluster.local
+
+  # Common pod-level knobs (override per component if you want)
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  # Hardened defaults (load-tested): block privilege escalation and drop
+  # all Linux capabilities. Images run as non-root via their Dockerfile
+  # USER directives. Override per-component if a specific workload needs
+  # a capability back (unusual — flag in review).
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+# Shared secrets (recommended: override via --set-file or external secret tooling)
+secrets:
+  existingSecretName: ""
+  adminApiToken: "CHANGE_ME"   # Used by Admin API auth & MeetingToken signing across services
+  transcriptionServiceToken: ""
+  internalApiSecret: ""        # Shared secret for gateway↔admin-api internal calls (defaults to "vexa-internal-secret")
+  vexaApiKey: ""               # Pre-provisioned API key for dashboard proxy (optional, create via admin API)
+
+# Shared database config (used by admin-api, meeting-api, runtime-api)
+database:
+  host: ""          # auto-filled if postgres.enabled=true, else REQUIRED
+  port: 5432
+  name: "vexa"
+  user: "postgres"
+  password: "postgres"
+  sslMode: "disable"
+
+# Shared redis config
+redisConfig:
+  url: ""           # auto-filled if redis.enabled=true, else REQUIRED
+  host: ""
+  port: 6379
+
+# ---------- Components ----------
+
+apiGateway:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: vexaai/api-gateway
+    tag: dev
+  mcpUrl: ""
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  extraEnv: []
+
+adminApi:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: vexaai/admin-api
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 8001
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  extraEnv: []
+
+meetingApi:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: vexaai/meeting-api
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 8080
+  recordingEnabled: "true"
+  storageBackend: minio
+  botImageName: "vexaai/vexa-bot:latest"
+  transcriptionServiceUrl: ""
+  transcriptionServiceToken: ""
+  minioSecure: "false"
+  logLevel: "INFO"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  # Connection-pool sizing for the meeting-api → Postgres path. Defaults
+  # tuned against a single-node LKE smoke run; raise for heavier traffic.
+  # Names match the asyncpg pool knobs read by meeting_api/database.py.
+  extraEnv:
+    - name: DB_POOL_SIZE
+      value: "20"
+    - name: DB_MAX_OVERFLOW
+      value: "20"
+    - name: DB_POOL_TIMEOUT
+      value: "10"
+
+runtimeApi:
+  enabled: true
+  replicaCount: 1
+  orchestrator: "process"       # "process" (default), "kubernetes" (K8s pods), or "docker"
+  browserImage: ""              # Bot container image (defaults to meetingApi image if empty)
+  image:
+    repository: vexaai/runtime-api
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 8090
+  profilesPath: "/app/profiles.yaml"
+  # ConfigMap name holding the profiles.yaml mounted at profilesPath. Without
+  # this set, the pod falls back to the baked-in demo profiles from the image
+  # and every POST /containers {profile: "meeting"} returns 400 "Unknown
+  # profile: meeting". Keep this set for any real deployment.
+  profilesConfigMap: "vexa-runtime-profiles"
+  logLevel: "INFO"
+  # Load-tested shape (from proprietary wrapper staging values): runtime-api
+  # is a thin dispatcher — lean requests, modest cpu limit for spikes.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+  extraEnv: []
+
+ttsService:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: vexaai/tts-service
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 8002
+  apiToken: ""
+  logLevel: "INFO"
+  persistence:
+    size: 5Gi
+    storageClassName: ""
+  # Load-tested shape (from proprietary wrapper staging values): TTS is
+  # bursty — lean cpu request, bigger memory for voice cache.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 256Mi
+    limits:
+      cpu: 100m
+      memory: 512Mi
+  extraEnv: []
+
+mcp:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: vexaai/mcp
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 18888
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  extraEnv: []
+
+dashboard:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: vexaai/dashboard
+    tag: dev
+  service:
+    type: ClusterIP
+    port: 3000
+  # env:
+  #   ENABLE_AZURE_AD_AUTH: "true"
+  #   NEXTAUTH_URL: ""
+  env: {}
+  extraEnv: []
+  extraSecretName: ""
+  extraSecretEnv: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+
+migrations:
+  enabled: false
+  backoffLimit: 3
+  image:
+    repository: ""
+    tag: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ---------- Optional bundled dependencies (for dev) ----------
+
+postgres:
+  enabled: true
+  image: postgres:17-alpine
+  credentialsSecretName: postgres-credentials
+  # idle_in_transaction_session_timeout (ms) — Postgres auto-kills connections
+  # that hold a transaction open past this threshold. Defense-in-depth against
+  # DB session leaks in meeting-api (see services/meeting-api/meeting_api/database.py).
+  idleInTransactionTimeoutMs: 60000
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+  service:
+    port: 6379
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClassName: ""
+  # Memory cap + eviction policy. Without these, Redis grows unbounded
+  # until the pod OOMs — which kills WebSocket pub/sub, transcription
+  # segments, and session state simultaneously. Default policy drops
+  # the least-recently-used keys (safe for all Vexa-side usages).
+  maxmemory: "1gb"
+  maxmemoryPolicy: "allkeys-lru"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+minio:
+  enabled: true
+  image:
+    repository: minio/minio
+    tag: latest
+  accessKey: vexa-access-key
+  secretKey: vexa-secret-key
+  bucket: vexa
+  persistence:
+    size: 10Gi
+    storageClassName: ""
+  service:
+    type: ClusterIP
+    port: 9000
+  # Proprietary wrapper values leave minio at the OSS default (no override),
+  # so the OSS default itself must be cpu-limit-complete. 500m matches the
+  # api-gateway / admin-api shape — storage services are typically IO-bound,
+  # cpu is a burst-absorb knob, not a sustained workload.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ---------- Ingress (optional; exposes api-gateway by default) ----------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: "vexa.local"
+  tls: []
+  paths:
+    - path: /
+      pathType: Prefix
+      service: api-gateway
+      servicePort: 8000
+
+# ──────────────────────────────────────────────────────────────────────
+# runtime-api container profiles — mounted as ConfigMap into the pod
+# when runtimeApi.profilesConfigMap is non-empty.
+#
+# Mirrors the vexa-platform production profiles; override in your own
+# values file if you need different resource envelopes.
+# ──────────────────────────────────────────────────────────────────────
+runtimeProfiles: |
+  profiles:
+    meeting:
+      image: "${BROWSER_IMAGE}"
+      command: ["/app/vexa-bot/entrypoint.sh"]
+      working_dir: "/app/vexa-bot"
+      resources:
+        cpu_request: "1000m"
+        cpu_limit: "1500m"
+        memory_request: "1100Mi"
+        memory_limit: "1536Mi"
+        shm_size: 2147483648
+      idle_timeout: 0
+      auto_remove: false
+      env:
+        DISPLAY: "${DISPLAY:-:99}"
+        NODE_ENV: "production"
+        REDIS_URL: "${REDIS_URL}"
+        TRANSCRIPTION_SERVICE_URL: "${TRANSCRIPTION_SERVICE_URL}"
+        TRANSCRIPTION_SERVICE_TOKEN: "${TRANSCRIPTION_SERVICE_TOKEN}"
+      ports:
+        "9222/tcp": {}
+    browser-session:
+      image: "${BROWSER_IMAGE}"
+      command: ["/app/vexa-bot/entrypoint.sh"]
+      working_dir: "/app/vexa-bot"
+      resources:
+        cpu_request: "1000m"
+        cpu_limit: "1500m"
+        memory_request: "1100Mi"
+        memory_limit: "1536Mi"
+        shm_size: 2147483648
+      idle_timeout: 0
+      auto_remove: false
+      env:
+        DISPLAY: "${DISPLAY:-:99}"
+        NODE_ENV: "production"
+        REDIS_URL: "${REDIS_URL}"
+      ports:
+        "6080/tcp": {}
+        "9222/tcp": {}
+        "9223/tcp": {}
+
+# ──────────────────────────────────────────────────────────────────────
+# PodDisruptionBudgets (optional, off by default)
+#
+# Enables minAvailable guarantees on services that matter for availability
+# during node drain (LKE maintenance, auto-upgrade, manual `kubectl drain`).
+# Off by default so `helm install` on a single-node dev cluster doesn't
+# block drains. Flip to `enabled: true` per-service on multi-node clusters.
+# ──────────────────────────────────────────────────────────────────────
+podDisruptionBudgets:
+  apiGateway:
+    enabled: false
+    minAvailable: 1
+  adminApi:
+    enabled: false
+    minAvailable: 1
+  meetingApi:
+    enabled: false
+    minAvailable: 1
+  runtimeApi:
+    enabled: false
+    minAvailable: 1
+  dashboard:
+    enabled: false
+    minAvailable: 1
+  redis:
+    enabled: false
+    minAvailable: 1

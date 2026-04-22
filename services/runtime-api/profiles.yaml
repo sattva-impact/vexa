@@ -1,0 +1,68 @@
+# Container profiles — declarative templates for container types.
+# Each profile defines the image, resources, timeouts, and defaults.
+# Hot-reload: send SIGHUP to the runtime-api process after editing.
+#
+# No fallback defaults. If an env var is missing, the profile must fail
+# visibly — not silently use :latest or localhost.
+
+profiles:
+  # Meeting bot — Playwright browser for meeting transcription
+  # Lifetime: managed by meeting-api (scheduler max_bot_time + bot-side timers)
+  meeting:
+    image: "${BROWSER_IMAGE}"
+    command: ["/app/vexa-bot/entrypoint.sh"]
+    working_dir: "/app/vexa-bot"
+    resources:
+      cpu_request: "1000m"     # measured p95: 780m (load test 2026-04-15, 19 bots)
+      cpu_limit: "1500m"       # 1.5x headroom for browser spikes
+      memory_request: "1100Mi" # measured p95: 977Mi (load test 2026-04-15, 19 bots)
+      memory_limit: "1536Mi"   # 1.5x headroom for Chrome memory spikes
+      shm_size: 2147483648     # 2GB shared memory for browser
+    idle_timeout: 0          # managed by meeting-api (scheduler + bot-side timers)
+    auto_remove: false
+    env:
+      DISPLAY: "${DISPLAY:-:99}"
+      NODE_ENV: "production"
+      REDIS_URL: "${REDIS_URL}"
+      TRANSCRIPTION_SERVICE_URL: "${TRANSCRIPTION_SERVICE_URL}"
+      TRANSCRIPTION_SERVICE_TOKEN: "${TRANSCRIPTION_SERVICE_TOKEN}"
+    ports:
+      "9222/tcp": {}         # CDP debug port
+
+  # Browser session — persistent Chrome with VNC/CDP
+  # Lifetime: gateway heartbeats /touch on every /b/{token}/* request + periodic while WS open
+  browser-session:
+    image: "${BROWSER_IMAGE}"
+    command: ["/app/vexa-bot/entrypoint.sh"]
+    working_dir: "/app/vexa-bot"
+    resources:
+      cpu_request: "1000m"     # same as meeting bot
+      cpu_limit: "1500m"
+      memory_request: "1100Mi"
+      memory_limit: "1536Mi"
+      shm_size: 2147483648     # 2GB shared memory for browser
+    idle_timeout: 3600       # 1h — gateway /touch keeps alive while connected
+    auto_remove: false
+    env:
+      DISPLAY: "${DISPLAY:-:99}"
+      NODE_ENV: "production"
+      REDIS_URL: "${REDIS_URL}"
+    ports:
+      "9222/tcp": {}         # CDP debug port
+
+  # Claude Code agent — runs Claude CLI for interactive AI sessions
+  # Lifetime: agent-api heartbeats via /touch
+  agent:
+    image: "${AGENT_IMAGE}"
+    command: ["sleep", "infinity"]
+    resources:
+      cpu_request: "500m"
+      cpu_limit: "2000m"
+      memory_request: "512Mi"
+      memory_limit: "2Gi"
+    idle_timeout: 300         # 5 minutes — agent-api must /touch to keep alive
+    auto_remove: false
+    env:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    mounts: []
