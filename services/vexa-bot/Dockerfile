@@ -1,7 +1,7 @@
 # ==============================================================================
 # Stage 1: Build native addon (Zoom SDK wrapper)
 # ==============================================================================
-FROM --platform=linux/amd64 node:20-bullseye AS native-builder
+FROM node:20-bullseye AS native-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -55,9 +55,11 @@ WORKDIR /app/vexa-bot/core
 RUN npm install
 RUN npm install -g typescript
 
-# Copy TypeScript source and assets (default avatar logo)
+# Copy TypeScript source
 COPY core/src/ ./src/
-COPY core/assets/ ./assets/
+
+# Ensure assets directory exists (populated by COPY below if the directory is present in the repo)
+RUN mkdir -p ./assets
 
 # Build TypeScript
 RUN npm run build
