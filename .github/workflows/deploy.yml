@@ -1,132 +1,106 @@
-# name: Deploy to AWS
+# Vexa: build two images (vexa-bot + transcription-service), push to ECR, deploy via App Runner.
+#
+# Secrets (align with your API workflow naming):
+#   AWS_ACCESS_KEY
+#   AWS_SECRET_KEY
+#   ECR_URI_BOT            — full ECR repo URI, no tag (e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com/vexa-bot)
+#   ECR_URI_TRANSCRIPT
+#   APP_RUNNER_DEV_ARN_BOT
+#   APP_RUNNER_DEV_ARN_TRANSCRIPT
+#   APP_RUNNER_PROD_ARN_BOT
+#   APP_RUNNER_PROD_ARN_TRANSCRIPT
 
-# on:
-#   push:
-#     branches:
-#       - main
-
-# env:
-#   AWS_REGION: us-east-2
-
-# jobs:
-#   build-and-push:
-#     runs-on: ubuntu-latest
-
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@v4
-
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v4
-#         with:
-#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           aws-region: ${{ env.AWS_REGION }}
-
-#       - name: Login to Amazon ECR
-#         id: login-ecr
-#         uses: aws-actions/amazon-ecr-login@v2
-
-#       # ---------------- BOT/AI ----------------
-#       - name: Build bot image
-#         run: |
-#           docker build -t bot-ai ./services/vexa-bot
-
-#       - name: Tag bot image
-#         run: |
-#           docker tag bot-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
-#           docker tag bot-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:${{ github.sha }}
-
-#       - name: Push bot image
-#         run: |
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:${{ github.sha }}
-
-#       # ---------------- TRANSCRIPT ----------------
-#       - name: Build transcript image
-#         run: |
-#           docker build -t transcript-ai ./services/transcription-service
-
-#       - name: Tag transcript image
-#         run: |
-#           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-#           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
-#       - name: Push transcript image
-#         run: |
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
-
-
-
-
-
-
-
-name: Deploy to AWS
+name: Vexa CI/CD
 
 on:
   push:
     branches:
+      - main
       - test/main
+    tags:
+      - "v*"
+
+concurrency:
+  group: vexa-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-2
+  DOCKER_DEFAULT_PLATFORM: linux/amd64
 
 jobs:
-  deploy:
+  build-and-push:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Set image tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_TAG=dev" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push vexa-bot
+        env:
+          ECR_URI_BOT: ${{ secrets.ECR_URI_BOT }}
+        run: |
+          test -n "$ECR_URI_BOT" || (echo "Set secret ECR_URI_BOT" && exit 1)
+          docker build --platform ${DOCKER_DEFAULT_PLATFORM} \
+            -f services/vexa-bot/Dockerfile \
+            -t "$ECR_URI_BOT:$IMAGE_TAG" \
+            services/vexa-bot
+          docker push "$ECR_URI_BOT:$IMAGE_TAG"
+
+      - name: Build and push transcription-service
+        env:
+          ECR_URI_TRANSCRIPT: ${{ secrets.ECR_URI_TRANSCRIPT }}
+        run: |
+          test -n "$ECR_URI_TRANSCRIPT" || (echo "Set secret ECR_URI_TRANSCRIPT" && exit 1)
+          docker build --platform ${DOCKER_DEFAULT_PLATFORM} \
+            -f services/transcription-service/Dockerfile \
+            -t "$ECR_URI_TRANSCRIPT:$IMAGE_TAG" \
+            services/transcription-service
+          docker push "$ECR_URI_TRANSCRIPT:$IMAGE_TAG"
+
+  deploy:
+    needs: build-and-push
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------------- BOT/AI (Vexa Lite) ----------------
-      - name: Deploy Vexa Lite to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            docker stop vexa || true
-            docker rm vexa || true
-            docker pull vexaai/vexa-lite:latest
-            docker run -d \
-              --name vexa \
-              --restart unless-stopped \
-              -p 8056:8056 \
-              -p 4000:3000 \
-              -v vexa-recordings:/var/lib/vexa/recordings \
-              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-              -e DB_SSL_MODE="require" \
-              -e ADMIN_API_TOKEN="${{ secrets.ADMIN_API_TOKEN }}" \
-              -e TRANSCRIPTION_SERVICE_URL="${{ secrets.TRANSCRIPTION_SERVICE_URL }}" \
-              -e TRANSCRIPTION_SERVICE_TOKEN="${{ secrets.TRANSCRIPTION_SERVICE_TOKEN }}" \
-              -e STORAGE_BACKEND="local" \
-              -e SKIP_TRANSCRIPTION_CHECK="true" \
-              vexaai/vexa-lite:latest
-
-      # ---------------- TRANSCRIPT ----------------
-      - name: Build transcript image
+      - name: Deploy to App Runner
         run: |
-          docker build -t transcript-ai ./services/transcription-service
-
-      - name: Tag transcript image
-        run: |
-          docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-          docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
-      - name: Push transcript image
-        run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            aws apprunner start-deployment \
+              --service-arn "${{ secrets.APP_RUNNER_PROD_ARN_BOT }}" \
+              --region "${{ env.AWS_REGION }}"
+            aws apprunner start-deployment \
+              --service-arn "${{ secrets.APP_RUNNER_PROD_ARN_TRANSCRIPT }}" \
+              --region "${{ env.AWS_REGION }}"
+          else
+            aws apprunner start-deployment \
+              --service-arn "${{ secrets.APP_RUNNER_DEV_ARN_BOT }}" \
+              --region "${{ env.AWS_REGION }}"
+            aws apprunner start-deployment \
+              --service-arn "${{ secrets.APP_RUNNER_DEV_ARN_TRANSCRIPT }}" \
+              --region "${{ env.AWS_REGION }}"
+          fi
