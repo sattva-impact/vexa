@@ -64,73 +64,6 @@
 
 
 
-# name: Deploy to AWS
-
-# on:
-#   push:
-#     branches:
-#       - main
-
-# env:
-#   AWS_REGION: us-east-2
-
-# jobs:
-#   deploy:
-#     runs-on: ubuntu-latest
-
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@v4
-
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v4
-#         with:
-#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           aws-region: ${{ env.AWS_REGION }}
-
-#       # ---------------- BOT/AI (Vexa Lite) ----------------
-#       - name: Deploy Vexa Lite to EC2
-#         uses: appleboy/ssh-action@v1.0.3
-#         with:
-#           host: ${{ secrets.EC2_HOST }}
-#           username: ubuntu
-#           key: ${{ secrets.EC2_SSH_KEY }}
-#           script: |
-#             docker stop vexa || true
-#             docker rm vexa || true
-#             docker pull vexaai/vexa-lite:latest
-#             docker run -d \
-#               --name vexa \
-#               --restart unless-stopped \
-#               -p 8056:8056 \
-#               -p 4000:3000 \
-#               -v vexa-recordings:/var/lib/vexa/recordings \
-#               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-#               -e DB_SSL_MODE="require" \
-#               -e ADMIN_API_TOKEN="${{ secrets.ADMIN_API_TOKEN }}" \
-#               -e TRANSCRIPTION_SERVICE_URL="${{ secrets.TRANSCRIPTION_SERVICE_URL }}" \
-#               -e TRANSCRIPTION_SERVICE_TOKEN="${{ secrets.TRANSCRIPTION_SERVICE_TOKEN }}" \
-#               -e STORAGE_BACKEND="local" \
-#               -e SKIP_TRANSCRIPTION_CHECK="true" \
-#               vexaai/vexa-lite:latest
-
-#       # ---------------- TRANSCRIPT ----------------
-#       - name: Build transcript image
-#         run: |
-#           docker build -t transcript-ai ./services/transcription-service
-
-#       - name: Tag transcript image
-#         run: |
-#           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-#           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
-#       - name: Push transcript image
-#         run: |
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
-#           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
-
-
 name: Deploy to AWS
 
 on:
@@ -156,25 +89,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
       # ---------------- BOT/AI (Vexa Lite) ----------------
-      - name: Build bot image
-        run: |
-          docker build -t bot-ai ./services/bot-service
-
-      - name: Tag bot image
-        run: |
-          docker tag bot-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
-          docker tag bot-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:${{ github.sha }}
-
-      - name: Push bot image to ECR
-        run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:${{ github.sha }}
-
       - name: Deploy Vexa Lite to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -182,10 +97,9 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
             docker stop vexa || true
             docker rm vexa || true
-            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
+            docker pull vexaai/vexa-lite:latest
             docker run -d \
               --name vexa \
               --restart unless-stopped \
@@ -199,7 +113,7 @@ jobs:
               -e TRANSCRIPTION_SERVICE_TOKEN="${{ secrets.TRANSCRIPTION_SERVICE_TOKEN }}" \
               -e STORAGE_BACKEND="local" \
               -e SKIP_TRANSCRIPTION_CHECK="true" \
-              ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_BOT }}:latest
+              vexaai/vexa-lite:latest
 
       # ---------------- TRANSCRIPT ----------------
       - name: Build transcript image
@@ -211,7 +125,8 @@ jobs:
           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
           docker tag transcript-ai:latest ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
 
-      - name: Push transcript image to ECR
+      - name: Push transcript image
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:latest
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_TRANSCRIPT }}:${{ github.sha }}
+
