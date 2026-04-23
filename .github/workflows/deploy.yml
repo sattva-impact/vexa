@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: us-east-2
+  AWS_REGION:   
   DOCKER_DEFAULT_PLATFORM: linux/amd64
 
 jobs:
