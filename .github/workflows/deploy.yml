@@ -1,3 +1,93 @@
+# name: Vexa CI/CD
+
+# on:
+#   push:
+#     branches:
+#       - main
+#       - test/main
+#     tags:
+#       - "v*"
+#   # Allows you to trigger the workflow manually from the Actions tab
+#   workflow_dispatch:
+#     inputs:
+#       skip_build:
+#         description: 'Skip build and push? (true/false)'
+#         default: 'false'
+#         type: boolean
+
+# concurrency:
+#   group: vexa-${{ github.ref }}
+#   cancel-in-progress: true
+
+# env:
+#   AWS_REGION: us-east-1
+#   DOCKER_DEFAULT_PLATFORM: linux/amd64
+
+# jobs:
+#   build-and-push:
+#     # Runs on push OR if manual trigger has skip_build set to false
+#     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.skip_build == false)
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+
+#       - name: Set image tag
+#         run: |
+#           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+#             echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+#           else
+#             echo "IMAGE_TAG=dev" >> "$GITHUB_ENV"
+#           fi
+
+#       - name: Configure AWS
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+#           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+#           aws-region: ${{ env.AWS_REGION }}
+
+#       - name: Login to ECR
+#         uses: aws-actions/amazon-ecr-login@v2
+
+#       - name: Build and push images
+#         run: |
+#           # Build Bot
+#           docker build --platform ${DOCKER_DEFAULT_PLATFORM} -f services/vexa-bot/Dockerfile -t "${{ secrets.ECR_URI_BOT }}:$IMAGE_TAG" services/vexa-bot
+#           docker push "${{ secrets.ECR_URI_BOT }}:$IMAGE_TAG"
+
+#           # Build Transcript
+#           docker build --platform ${DOCKER_DEFAULT_PLATFORM} -f services/transcription-service/Dockerfile -t "${{ secrets.ECR_URI_TRANSCRIPT }}:$IMAGE_TAG" services/transcription-service
+#           docker push "${{ secrets.ECR_URI_TRANSCRIPT }}:$IMAGE_TAG"
+
+#   deploy:
+#     # Runs if build succeeds OR if we manually skipped the build
+#     if: |
+#       always() &&
+#       (needs.build-and-push.result == 'success' || inputs.skip_build == true)
+#     needs: build-and-push
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Configure AWS
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }} # Corrected from previous error
+#           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+#           aws-region: ${{ env.AWS_REGION }}
+
+#       - name: Deploy to App Runner
+#         run: |
+#           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+#             ARN_BOT="${{ secrets.APP_RUNNER_PROD_ARN_BOT }}"
+#             ARN_TRANS="${{ secrets.APP_RUNNER_PROD_ARN_TRANSCRIPT }}"
+#           else
+#             ARN_BOT="${{ secrets.APP_RUNNER_DEV_ARN_BOT }}"
+#             ARN_TRANS="${{ secrets.APP_RUNNER_DEV_ARN_TRANSCRIPT }}"
+#           fi
+
+#           aws apprunner start-deployment --service-arn "$ARN_BOT"
+#           aws apprunner start-deployment --service-arn "$ARN_TRANS"
+
+
 name: Vexa CI/CD
 
 on:
@@ -7,7 +97,6 @@ on:
       - test/main
     tags:
       - "v*"
-  # Allows you to trigger the workflow manually from the Actions tab
   workflow_dispatch:
     inputs:
       skip_build:
@@ -25,7 +114,6 @@ env:
 
 jobs:
   build-and-push:
-    # Runs on push OR if manual trigger has skip_build set to false
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.skip_build == false)
     runs-on: ubuntu-latest
     steps:
@@ -60,7 +148,6 @@ jobs:
           docker push "${{ secrets.ECR_URI_TRANSCRIPT }}:$IMAGE_TAG"
 
   deploy:
-    # Runs if build succeeds OR if we manually skipped the build
     if: |
       always() &&
       (needs.build-and-push.result == 'success' || inputs.skip_build == true)
@@ -70,19 +157,40 @@ jobs:
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }} # Corrected from previous error
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to App Runner
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            ARN_BOT="${{ secrets.APP_RUNNER_PROD_ARN_BOT }}"
-            ARN_TRANS="${{ secrets.APP_RUNNER_PROD_ARN_TRANSCRIPT }}"
-          else
-            ARN_BOT="${{ secrets.APP_RUNNER_DEV_ARN_BOT }}"
-            ARN_TRANS="${{ secrets.APP_RUNNER_DEV_ARN_TRANSCRIPT }}"
-          fi
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-          aws apprunner start-deployment --service-arn "$ARN_BOT"
-          aws apprunner start-deployment --service-arn "$ARN_TRANS"
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: 34.226.218.24
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Login to ECR
+            aws ecr get-login-password --region us-east-1 | \
+              docker login --username AWS \
+              --password-stdin 573527217405.dkr.ecr.us-east-1.amazonaws.com
+
+            # Pull latest image
+            docker pull ${{ secrets.ECR_URI_TRANSCRIPT }}:dev
+
+            # Stop and remove old container
+            docker stop transcription-service || true
+            docker rm transcription-service || true
+
+            # Run new container
+            docker run -d \
+              --name transcription-service \
+              --restart always \
+              -p 80:8000 \
+              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              -e ADMIN_API_TOKEN="${{ secrets.ADMIN_API_TOKEN }}" \
+              -e AWS_REGION="us-east-1" \
+              -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY }}" \
+              -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_KEY }}" \
+              ${{ secrets.ECR_URI_TRANSCRIPT }}:dev
